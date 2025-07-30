@@ -1,0 +1,1212 @@
+"""
+Economix Bot API Routes - Direct Implementation
+
+AI-powered financial assistant with direct backend integration:
+- Text chat with knowledge graph integration
+- User-specific financial data retrieval
+- Real-time financial analysis
+"""
+
+from fastapi import APIRouter, Form, HTTPException, status, Request
+from fastapi.responses import JSONResponse
+from typing import Dict, Any
+import json
+from datetime import datetime
+
+from ..services.firestore_service import FirestoreService
+from ..services.gemini_service import GeminiService
+from ..utils.logging import get_logger
+
+# Create router
+router = APIRouter(prefix="/economix", tags=["Economix Bot"])
+logger = get_logger(__name__)
+
+# Initialize services
+firestore_service = FirestoreService()
+gemini_service = GeminiService()
+
+
+async def get_user_financial_data(user_id: str) -> Dict[str, Any]:
+    """Fetch user's financial data from Firestore."""
+    try:
+        logger.info(f"🔍 Fetching financial data for user: {user_id}")
+        
+        # Access user's knowledge graphs collection
+        kg_collection_ref = firestore_service.db.collection('users').document(user_id).collection('knowledge_graphs')
+        
+        # Get all documents
+        docs = kg_collection_ref.stream()
+        
+        # Process financial data
+        total_spent = 0.0
+        transactions = []
+        categories = {}
+        
+        for doc in docs:
+            if doc.exists:
+                doc_data = doc.to_dict()
+                
+                # Extract financial information from document
+                if doc_data and 'data' in doc_data:
+                    data = doc_data['data']
+                    
+                    # Get transaction amount
+                    amount = float(data.get('total_amount', 0))
+                    merchant = data.get('receipt_name', 'Unknown Merchant')
+                    date = data.get('created_at', datetime.now().isoformat())
+                    
+                    if amount > 0:  # Only include valid transactions
+                        total_spent += amount
+                        
+                        # Categorize transaction
+                        category = categorize_transaction(merchant)
+                        categories[category] = categories.get(category, 0) + amount
+                        
+                        transactions.append({
+                            'id': doc.id,
+                            'amount': amount,
+                            'merchant': merchant,
+                            'date': date,
+                            'category': category
+                        })
+                        
+                        logger.info(f"📄 Found transaction: {merchant} - ₹{amount}")
+        
+        # Log summary
+        logger.info(f"📊 Summary for {user_id}: ₹{total_spent} total, {len(transactions)} transactions")
+        
+        return {
+            'user_id': user_id,
+            'total_spent': total_spent,
+            'transaction_count': len(transactions),
+            'transactions': transactions,
+            'categories': categories
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error fetching financial data for {user_id}: {e}")
+        return {
+            'user_id': user_id,
+            'total_spent': 0.0,
+            'transaction_count': 0,
+            'transactions': [],
+            'categories': {}
+        }
+
+
+def categorize_transaction(merchant_name: str) -> str:
+    """Categorize transaction based on merchant name."""
+    merchant_lower = merchant_name.lower()
+    
+    if any(word in merchant_lower for word in ['grocery', 'supermarket', 'market', 'mart']):
+        return 'Groceries'
+    elif any(word in merchant_lower for word in ['restaurant', 'cafe', 'coffee', 'food', 'dining']):
+        return 'Food & Dining'
+    elif any(word in merchant_lower for word in ['gas', 'fuel', 'petrol', 'transport']):
+        return 'Transportation'
+    elif any(word in merchant_lower for word in ['shopping', 'store', 'mall']):
+        return 'Shopping'
+    else:
+        return 'Other'
+
+
+def create_financial_prompt(financial_data: Dict[str, Any], user_message: str) -> str:
+    """Create AI prompt with user's actual financial data."""
+    
+    user_id = financial_data.get('user_id', 'Unknown')
+    total_spent = financial_data.get('total_spent', 0)
+    transaction_count = financial_data.get('transaction_count', 0)
+    categories = financial_data.get('categories', {})
+    transactions = financial_data.get('transactions', [])
+    
+    # Build category breakdown
+    category_breakdown = ""
+    if categories:
+        for category, amount in categories.items():
+            percentage = (amount / total_spent * 100) if total_spent > 0 else 0
+            category_breakdown += f"- {category}: ₹{amount:.2f} ({percentage:.1f}%)\n"
+    else:
+        category_breakdown = "No spending categories available yet."
+    
+    # Build recent transactions
+    recent_transactions = ""
+    if transactions:
+        for tx in transactions[-5:]:  # Last 5 transactions
+            recent_transactions += f"- {tx['merchant']}: ₹{tx['amount']:.2f}\n"
+    else:
+        recent_transactions = "No transactions recorded yet."
+    
+    prompt = f"""You are Economix, an AI financial assistant for the Raseed app. You help users understand their spending and make smart financial decisions.
+
+USER FINANCIAL DATA FOR {user_id}:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💰 **Financial Overview:**
+- Total spent: ₹{total_spent:.2f}
+- Number of transactions: {transaction_count}
+
+📊 **Category Breakdown:**
+{category_breakdown}
+
+📋 **Recent Transactions:**
+{recent_transactions}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+USER QUESTION: {user_message}
+
+INSTRUCTIONS:
+1. Use the ACTUAL financial data provided above
+2. Give specific amounts and transaction counts
+3. Provide helpful insights based on their real spending
+4. Be conversational and helpful
+5. If they have no data, encourage them to start tracking expenses
+
+Please provide a helpful response using their actual financial information."""
+    
+    return prompt
+
+
+@router.post("/chat")
+async def chat_with_economix(
+    request: Request,
+    user_id: str = Form(None),
+    message: str = Form(None),
+    message_type: str = Form(default="text")
+):
+    """
+    Chat with Economix Bot using direct backend implementation.
+    """
+    try:
+        # Handle both JSON and form data
+        if user_id is None or message is None:
+            try:
+                body = await request.json()
+                user_id = body.get("user_id")
+                message = body.get("message")
+                message_type = body.get("message_type", "text")
+            except:
+                pass
+        
+        logger.info(f"🔍 ECONOMIX CHAT: user_id='{user_id}', message='{message}', type={message_type}")
+        
+        if not message or not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id and message are required"
+            )
+        
+        # Get user's actual financial data
+        logger.info(f"🔍 Fetching financial data for user: {user_id}")
+        user_financial_data = await get_user_financial_data(user_id)
+        
+        # Log what we found
+        total_spent = user_financial_data.get('total_spent', 0)
+        transaction_count = user_financial_data.get('transaction_count', 0)
+        logger.info(f"💰 User {user_id} data: ₹{total_spent} across {transaction_count} transactions")
+        
+        # Create AI prompt with actual user data
+        ai_prompt = create_financial_prompt(user_financial_data, message)
+        
+        # Get AI response
+        response = await gemini_service.generate_text_response(
+            prompt=ai_prompt,
+            context=[]
+        )
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "response": response,
+                "message_type": message_type,
+                "timestamp": datetime.now().isoformat(),
+                "user_id": user_id,
+                "financial_summary": {
+                    "total_spent": total_spent,
+                    "transaction_count": transaction_count
+                }
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error in chat endpoint: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to process message",
+                "details": str(e)
+            }
+        )
+            try:
+                body = await request.body()
+                if body:
+                    json_data = json.loads(body)
+                    user_id = json_data.get('user_id')
+                    message = json_data.get('message')
+                    message_type = json_data.get('message_type', 'text')
+            except Exception as json_error:
+                logger.error(f"Failed to parse JSON: {json_error}")
+        
+        logger.info(f"🔍 ECONOMIX CHAT DEBUG: Raw user_id='{user_id}', message='{message}', type={message_type}")
+        
+        if not message or not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id and message are required"
+            )
+        
+        # Debug: Check user's financial context with detailed logging
+        logger.info(f"🔍 FETCHING DATA FOR USER: '{user_id}' (type: {type(user_id)}, length: {len(str(user_id))})")
+        
+        # Get user's financial context with improved user identification
+        user_context = await economix_bot_agent._get_user_financial_context(user_id)
+        actual_user_id = user_context.get('user_id', user_id)
+        original_user_id = user_context.get('original_request_user_id', user_id)
+        
+        logger.info(f"💰 USER CONTEXT RESULT: Original request='{original_user_id}' -> Actual user='{actual_user_id}' -> Total spent: ₹{user_context.get('total_spent', 0)}, Transactions: {user_context.get('transaction_count', 0)}")
+        
+        # If we identified a different user, log it clearly
+        if actual_user_id != original_user_id:
+            logger.info(f"🔄 USER MAPPING: Mapped '{original_user_id}' to actual user '{actual_user_id}' with financial data")
+        
+        # Process with Economix Bot
+        response = await economix_bot_agent.process_text_message(user_id, message)
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "response": response,
+                "message_type": message_type,
+                "timestamp": datetime.now().isoformat(),
+                "user_id": user_id
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in chat endpoint: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to process message",
+                "details": str(e)
+            }
+        )
+
+
+@router.post("/chat/image")
+async def chat_with_image(
+    user_id: str = Form(...),
+    query: str = Form(default=""),
+    image: UploadFile = File(...)
+):
+    """
+    Process image message with AI vision analysis.
+    
+    Features:
+    - Receipt and document analysis
+    - Financial data extraction
+    - Smart categorization
+    - Wallet pass suggestions
+    """
+    try:
+        logger.info(f"Processing image message for user {user_id}")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        # Validate image
+        if not image.content_type or not image.content_type.startswith('image/'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File must be an image"
+            )
+        
+        # Read image data
+        image_data = await image.read()
+        
+        # Process with Economix Bot
+        response = await economix_bot_agent.process_image_message(
+            user_id=user_id,
+            image_data=image_data,
+            query=query
+        )
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "response": response,
+                "message_type": "image",
+                "query": query,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in image chat endpoint: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to process image",
+                "details": str(e)
+            }
+        )
+
+
+@router.post("/chat/file")
+async def chat_with_file(
+    user_id: str = Form(...),
+    query: str = Form(default=""),
+    file: UploadFile = File(...)
+):
+    """
+    Process file with document analysis.
+    
+    Supported formats:
+    - PDF documents
+    - Excel/CSV spreadsheets
+    - Image files (JPG, PNG)
+    """
+    try:
+        logger.info(f"Processing file message for user {user_id}: {file.filename}")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        # Validate file type
+        allowed_extensions = ['pdf', 'jpg', 'jpeg', 'png', 'csv', 'xlsx']
+        file_extension = file.filename.lower().split('.')[-1] if file.filename else ''
+        
+        if file_extension not in allowed_extensions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File type not supported. Allowed: {', '.join(allowed_extensions)}"
+            )
+        
+        # Read file data
+        file_data = await file.read()
+        
+        # Process with Economix Bot
+        response = await economix_bot_agent.process_file_message(
+            user_id=user_id,
+            file_data=file_data,
+            filename=file.filename or "unknown_file",
+            query=query
+        )
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "response": response,
+                "message_type": "file",
+                "filename": file.filename,
+                "query": query,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in file chat endpoint: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to process file",
+                "details": str(e)
+            }
+        )
+
+
+@router.post("/chat/audio")
+async def chat_with_audio(
+    user_id: str = Form(...),
+    audio: UploadFile = File(...)
+):
+    """
+    Process audio message with speech-to-text and AI analysis.
+    
+    Features:
+    - Speech-to-text conversion
+    - Natural language processing
+    - Audio quality optimization
+    """
+    try:
+        logger.info(f"Processing audio message for user {user_id}")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        # Validate audio file
+        if not audio.content_type or not audio.content_type.startswith('audio/'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File must be an audio file"
+            )
+        
+        # Read audio data
+        audio_data = await audio.read()
+        
+        # Process with Economix Bot
+        response = await economix_bot_agent.process_audio_message(
+            user_id=user_id,
+            audio_data=audio_data
+        )
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "response": response,
+                "message_type": "audio",
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in audio chat endpoint: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to process audio",
+                "details": str(e)
+            }
+        )
+
+
+@router.get("/financial-summary")
+async def get_financial_summary(user_id: str):
+    """
+    Get comprehensive financial summary for user.
+    
+    Returns:
+    - Total spending analysis
+    - Category breakdowns
+    - Spending trends
+    - AI-generated insights
+    """
+    try:
+        logger.info(f"Generating financial summary for user {user_id}")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        summary = await economix_bot_agent.get_financial_summary(user_id)
+        
+        return JSONResponse(content=summary)
+        
+    except Exception as e:
+        logger.error(f"Error generating financial summary: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to generate financial summary",
+                "details": str(e)
+            }
+        )
+
+
+@router.get("/recommendations/shopping")
+async def get_shopping_recommendations(user_id: str, category: str = "all"):
+    """
+    Get smart shopping recommendations based on user's spending patterns.
+    
+    Features:
+    - Personalized store suggestions
+    - Discount opportunities
+    - Budget optimization tips
+    - Seasonal recommendations
+    """
+    try:
+        logger.info(f"Getting shopping recommendations for user {user_id}, category: {category}")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        recommendations = await economix_bot_agent.get_shopping_recommendations(user_id, category)
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "recommendations": recommendations,
+                "category": category,
+                "user_id": user_id,
+                "generated_at": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting shopping recommendations: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to get shopping recommendations",
+                "details": str(e)
+            }
+        )
+
+
+@router.get("/insights/spending")
+async def get_spending_insights(user_id: str, period: str = "month"):
+    """
+    Get detailed spending insights and analysis.
+    
+    Periods: day, week, month, quarter, year
+    
+    Features:
+    - Spending pattern analysis
+    - Trend identification
+    - Anomaly detection
+    - Personalized recommendations
+    """
+    try:
+        logger.info(f"Getting spending insights for user {user_id}, period: {period}")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        valid_periods = ["day", "week", "month", "quarter", "year"]
+        if period not in valid_periods:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid period. Must be one of: {', '.join(valid_periods)}"
+            )
+        
+        insights = await economix_bot_agent.get_spending_insights(user_id, period)
+        
+        return JSONResponse(content=insights)
+        
+    except Exception as e:
+        logger.error(f"Error getting spending insights: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to get spending insights",
+                "details": str(e)
+            }
+        )
+
+
+@router.get("/chat/history")
+async def get_chat_history(user_id: str, limit: int = 50):
+    """
+    Get chat history for user.
+    
+    Returns recent conversation history with Economix Bot.
+    """
+    try:
+        logger.info(f"Getting chat history for user {user_id}")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        # Get conversation history from Firestore
+        conversations = await economix_bot_agent.firestore.query_documents(
+            collection="economix_conversations",
+            filters=[("user_id", "==", user_id)],
+            order_by=[("timestamp", "desc")],
+            limit=limit
+        )
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "messages": conversations,
+                "count": len(conversations),
+                "user_id": user_id
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting chat history: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to get chat history",
+                "details": str(e)
+            }
+        )
+
+
+@router.delete("/chat/history")
+async def clear_chat_history(user_id: str = Form(...)):
+    """
+    Clear chat history for user.
+    """
+    try:
+        logger.info(f"Clearing chat history for user {user_id}")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        # Delete conversations from Firestore
+        conversations = await economix_bot_agent.firestore.query_documents(
+            collection="economix_conversations",
+            filters=[("user_id", "==", user_id)]
+        )
+        
+        deleted_count = 0
+        for conversation in conversations:
+            await economix_bot_agent.firestore.delete_document(
+                "economix_conversations", 
+                conversation.get('id')
+            )
+            deleted_count += 1
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "message": f"Cleared {deleted_count} conversation records",
+                "deleted_count": deleted_count
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error clearing chat history: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to clear chat history",
+                "details": str(e)
+            }
+        )
+
+
+@router.post("/recipe-shopping-list")
+async def generate_recipe_shopping_list(
+    user_id: str = Form(...),
+    recipe_name: str = Form(...)
+):
+    """
+    Generate smart shopping list for a recipe.
+    
+    Features:
+    - Recipe ingredient analysis
+    - Knowledge graph integration for existing groceries
+    - Expiry date checking
+    - Shopping list optimization
+    - Google Wallet pass generation
+    """
+    try:
+        logger.info(f"Generating recipe shopping list for user {user_id}: {recipe_name}")
+        
+        if not user_id or not recipe_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id and recipe_name are required"
+            )
+        
+        # Process recipe request through Economix Bot
+        recipe_message = f"I want to make {recipe_name}. Can you help me with a shopping list?"
+        response = await economix_bot_agent.process_text_message(user_id, recipe_message)
+        
+        # Get the generated shopping list pass data
+        shopping_passes = await economix_bot_agent.firestore.query_documents(
+            collection="shopping_list_passes",
+            filters=[
+                ("user_id", "==", user_id),
+                ("recipe_name", "==", recipe_name)
+            ],
+            order_by=[("created_at", "desc")],
+            limit=1
+        )
+        
+        shopping_list_data = shopping_passes[0] if shopping_passes else None
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "response": response,
+                "shopping_list": shopping_list_data,
+                "recipe_name": recipe_name,
+                "user_id": user_id,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error generating recipe shopping list: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to generate recipe shopping list",
+                "details": str(e)
+            }
+        )
+
+
+@router.get("/grocery-inventory/{user_id}")
+async def get_grocery_inventory(user_id: str):
+    """
+    Get user's current grocery inventory from knowledge graph.
+    
+    Features:
+    - Active grocery items
+    - Expiry date tracking
+    - Purchase history integration
+    - Quantity tracking
+    """
+    try:
+        logger.info(f"Getting grocery inventory for user {user_id}")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        # Get user's existing groceries
+        existing_groceries = await economix_bot_agent._get_user_groceries(user_id)
+        
+        # Organize inventory by category
+        inventory = {
+            "fresh_produce": [],
+            "pantry_items": [],
+            "dairy": [],
+            "meat_seafood": [],
+            "frozen": [],
+            "other": []
+        }
+        
+        # Categorize items (simplified categorization)
+        for item in existing_groceries:
+            name = item['name'].lower()
+            if any(keyword in name for keyword in ['vegetable', 'fruit', 'lettuce', 'tomato', 'onion']):
+                inventory["fresh_produce"].append(item)
+            elif any(keyword in name for keyword in ['pasta', 'rice', 'flour', 'oil', 'spice']):
+                inventory["pantry_items"].append(item)
+            elif any(keyword in name for keyword in ['milk', 'cheese', 'cream', 'butter']):
+                inventory["dairy"].append(item)
+            elif any(keyword in name for keyword in ['chicken', 'beef', 'fish', 'meat']):
+                inventory["meat_seafood"].append(item)
+            elif any(keyword in name for keyword in ['frozen', 'ice']):
+                inventory["frozen"].append(item)
+            else:
+                inventory["other"].append(item)
+        
+        total_items = len(existing_groceries)
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "inventory": inventory,
+                "total_items": total_items,
+                "user_id": user_id,
+                "last_updated": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting grocery inventory: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to get grocery inventory",
+                "details": str(e)
+            }
+        )
+
+
+@router.post("/create-shopping-pass")
+async def create_shopping_list_pass(
+    user_id: str = Form(...),
+    shopping_list: str = Form(...)  # JSON string of shopping list data
+):
+    """
+    Create Google Wallet pass for shopping list.
+    
+    Features:
+    - Shopping list formatting
+    - Estimated cost calculation
+    - Store integration
+    - Pass generation
+    """
+    try:
+        logger.info(f"Creating shopping pass for user {user_id}")
+        
+        if not user_id or not shopping_list:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id and shopping_list are required"
+            )
+        
+        # Parse shopping list data
+        shopping_data = json.loads(shopping_list)
+        
+        # Create wallet pass data
+        pass_data = {
+            "type": "shopping_list",
+            "title": shopping_data.get("title", "Shopping List"),
+            "description": shopping_data.get("description", "Smart shopping list generated by Economix Bot"),
+            "items": shopping_data.get("items", []),
+            "total_items": len(shopping_data.get("items", [])),
+            "estimated_cost": shopping_data.get("estimated_cost", "₹0"),
+            "user_id": user_id,
+            "created_at": datetime.now(),
+            "status": "active"
+        }
+        
+        # Save pass to Firestore
+        pass_doc = await economix_bot_agent.firestore.add_document("shopping_list_passes", pass_data)
+        
+        # Generate Google Wallet URL (placeholder for actual implementation)
+        wallet_url = f"https://pay.google.com/passes/{pass_doc.get('id', 'unknown')}"
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "pass_data": pass_data,
+                "wallet_url": wallet_url,
+                "pass_id": pass_doc.get('id'),
+                "message": "Shopping list pass created successfully!"
+            }
+        )
+        
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid shopping_list JSON format"
+        )
+    except Exception as e:
+        logger.error(f"Error creating shopping pass: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to create shopping pass",
+                "details": str(e)
+            }
+        )
+
+
+@router.get("/shopping-passes/{user_id}")
+async def get_user_shopping_passes(user_id: str):
+    """
+    Get all shopping list passes for a user.
+    """
+    try:
+        logger.info(f"Getting shopping passes for user {user_id}")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        # Get user's shopping passes
+        passes = await economix_bot_agent.firestore.query_documents(
+            collection="shopping_list_passes",
+            filters=[("user_id", "==", user_id)],
+            order_by=[("created_at", "desc")],
+            limit=20
+        )
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "passes": passes,
+                "count": len(passes),
+                "user_id": user_id
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting shopping passes: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": "Failed to get shopping passes",
+                "details": str(e)
+            }
+        )
+
+
+@router.get("/health")
+async def economix_health():
+    """
+    Check Economix Bot health and capabilities.
+    """
+    try:
+        health_checks = {
+            "economix_bot": "operational",
+            "firestore": "connected",
+            "gemini_ai": "operational",
+            "multi_modal_support": "enabled",
+            "knowledge_graph": "integrated",
+            "recipe_functionality": "enabled"
+        }
+        
+        # Test basic functionality
+        test_user_context = await economix_bot_agent._get_user_financial_context("health_check")
+        health_checks["context_retrieval"] = "operational" if test_user_context else "limited"
+        
+        capabilities = {
+            "text_chat": True,
+            "image_analysis": True,
+            "file_processing": True,
+            "audio_processing": True,
+            "financial_insights": True,
+            "shopping_recommendations": True,
+            "spending_analysis": True,
+            "knowledge_graph_integration": True,
+            "recipe_shopping_lists": True,
+            "grocery_inventory_tracking": True,
+            "smart_shopping_passes": True
+        }
+        
+        return JSONResponse(
+            content={
+                "status": "healthy",
+                "service": "economix_bot",
+                "timestamp": datetime.now().isoformat(),
+                "checks": health_checks,
+                "capabilities": capabilities,
+                "version": "1.1.0"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+
+
+@router.post("/identify-user")
+async def identify_user(request: Request):
+    """
+    Identify the real user from a request and show their financial data.
+    This helps debug user identification issues.
+    """
+    try:
+        body = await request.body()
+        if body:
+            json_data = json.loads(body)
+            requested_user_id = json_data.get("user_id", "unknown")
+        else:
+            requested_user_id = "unknown"
+        
+        logger.info(f"🔍 USER IDENTIFICATION REQUEST for: '{requested_user_id}'")
+        
+        # Use the new identification system
+        actual_user_id = await economix_bot_agent._identify_real_user_id(requested_user_id)
+        
+        # Get financial context for the identified user
+        user_context = await economix_bot_agent._get_user_financial_context(requested_user_id)
+        
+        # Get list of all users with data for comparison
+        from ..services.firestore_service import FirestoreService
+        firestore = FirestoreService()
+        
+        users_ref = firestore.db.collection('users')
+        all_users = list(users_ref.limit(20).stream())
+        users_with_data = []
+        
+        for user_doc in all_users:
+            kg_ref = firestore.db.collection('users').document(user_doc.id).collection('knowledge_graphs')
+            kg_count = len(list(kg_ref.limit(5).stream()))
+            
+            if kg_count > 0:
+                users_with_data.append({
+                    'user_id': user_doc.id,
+                    'kg_count': kg_count,
+                    'user_data': user_doc.to_dict()
+                })
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "identification_result": {
+                    "requested_user_id": requested_user_id,
+                    "identified_user_id": actual_user_id,
+                    "mapping_applied": actual_user_id != requested_user_id
+                },
+                "financial_data": {
+                    "total_spent": user_context.get('total_spent', 0),
+                    "transaction_count": user_context.get('transaction_count', 0),
+                    "categories": list(user_context.get('categories', {}).keys())
+                },
+                "available_users": users_with_data[:5],  # Top 5 users with data
+                "total_users_with_data": len(users_with_data),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"User identification error: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+
+
+@router.post("/test-user-data")
+async def test_user_data(request: Request):
+    """
+    Test endpoint to check what user data exists in Firestore.
+    """
+    try:
+        body = await request.body()
+        if body:
+            json_data = json.loads(body)
+            user_id = json_data.get("user_id", "test@gmail.com")
+        else:
+            user_id = "test@gmail.com"  # default for testing
+        
+        from ..services.firestore_service import FirestoreService
+        firestore = FirestoreService()
+        
+        # List all users in the database
+        users_ref = firestore.db.collection('users')
+        all_users = list(users_ref.limit(50).stream())
+        user_list = []
+        
+        for user_doc in all_users:
+            user_data = user_doc.to_dict()
+            # Check if user has knowledge graphs
+            kg_ref = firestore.db.collection('users').document(user_doc.id).collection('knowledge_graphs')
+            kg_docs = list(kg_ref.limit(5).stream())
+            
+            user_list.append({
+                'user_id': user_doc.id,
+                'email': user_data.get('email', 'N/A'),
+                'name': user_data.get('name', 'N/A'),
+                'knowledge_graphs_count': len(kg_docs),
+                'kg_samples': [doc.id for doc in kg_docs[:3]]
+            })
+        
+        # Get specific user data
+        specific_user_context = await economix_bot_agent._get_user_financial_context(user_id)
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "requested_user": user_id,
+                "total_users_found": len(user_list),
+                "all_users": user_list,
+                "specific_user_data": {
+                    "total_spent": specific_user_context.get('total_spent', 0),
+                    "transaction_count": specific_user_context.get('transaction_count', 0),
+                    "categories": list(specific_user_context.get('categories', {}).keys())
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Test user data error: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+
+
+@router.post("/debug-user-context")
+async def debug_user_context(request: Request):
+    """
+    Debug endpoint to check user's financial context data.
+    Returns raw financial data for troubleshooting.
+    """
+    def clean_data_for_json(data):
+        """Clean data to make it JSON serializable."""
+        if isinstance(data, dict):
+            return {k: clean_data_for_json(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [clean_data_for_json(item) for item in data]
+        elif hasattr(data, 'isoformat'):  # datetime objects
+            return data.isoformat()
+        else:
+            return data
+    
+    try:
+        body = await request.body()
+        if body:
+            json_data = json.loads(body)
+            user_id = json_data.get("user_id")
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Request body is required"
+            )
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required"
+            )
+        
+        # Get user's financial context
+        financial_context = await economix_bot_agent._get_user_financial_context(user_id)
+        
+        # Clean the data to make it JSON serializable
+        clean_financial_context = clean_data_for_json(financial_context)
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "user_id": user_id,
+                "financial_context": clean_financial_context,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Debug endpoint error: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
