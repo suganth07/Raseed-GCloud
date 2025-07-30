@@ -1,4 +1,3 @@
-import os
 from typing import Optional
 import base64
 import json
@@ -32,13 +31,8 @@ class Settings(BaseSettings):
     
     # API Configuration
     api_host: str = Field(default="0.0.0.0", env="API_HOST")
-    app_port: int = Field(default=8080, env="APP_PORT")  # Use APP_PORT for local development
+    api_port: int = Field(default=8080, env="PORT")  # Cloud Run sets PORT=8080
     debug: bool = Field(default=False, env="DEBUG")
-    
-    @property
-    def api_port(self) -> int:
-        """Get the API port, preferring Cloud Run's PORT env var if available."""
-        return int(os.environ.get("PORT", self.app_port))
     
     # CORS Configuration
     allowed_origins: list[str] = Field(
