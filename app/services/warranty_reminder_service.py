@@ -101,42 +101,23 @@ class WarrantyReminderService(LoggerMixin):
             graphs_collection = user_doc_ref.collection('knowledge_graphs')
             docs = graphs_collection.stream()
             
-            doc_count = 0
-            total_products = 0
-            
             for doc in docs:
-                doc_count += 1
                 graph_data = doc.to_dict()
-                self.logger.info(f"Processing document {doc.id} for user {user_id}")
                 
                 # Products are stored directly in 'products' array, not in 'entities'
                 products = graph_data.get('products', [])
-                total_products += len(products)
-                self.logger.info(f"Found {len(products)} products in document {doc.id}")
                 
                 # Find products with warranties or expiry dates
                 for product in products:
-                    product_name = product.get('name', 'Unknown')
-                    self.logger.info(f"Checking product: {product_name}")
-                    self.logger.info(f"Product data: warranty={product.get('warranty')}, warranty_period={product.get('warranty_period')}, has_expiry={product.get('has_expiry')}, expiry_date={product.get('expiry_date')}")
-                    
                     # Check for warranty or expiry information
-                    # Note: Flutter app stores warranty info with 'warranty' field instead of 'has_warranty'
                     has_warranty = product.get('warranty', False) or product.get('warranty_period') is not None
                     has_expiry = product.get('has_expiry', False) or product.get('expiry_date') is not None
                     
                     if has_warranty or has_expiry:
-                        self.logger.info(f"Product {product_name} has warranty/expiry info")
                         warranty_item = await self._extract_warranty_info_from_product(product, graph_data)
                         if warranty_item:
                             warranty_items.append(warranty_item)
-                            self.logger.info(f"Added warranty item for {product_name}")
-                        else:
-                            self.logger.info(f"Failed to extract warranty info for {product_name}")
-                    else:
-                        self.logger.info(f"Product {product_name} has no warranty/expiry info")
             
-            self.logger.info(f"Processed {doc_count} documents with {total_products} total products for user {user_id}")
             self.logger.info(f"Found {len(warranty_items)} warranty items for user {user_id}")
             return warranty_items
             
