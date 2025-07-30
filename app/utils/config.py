@@ -31,7 +31,6 @@ class Settings(BaseSettings):
     
     # API Configuration
     api_host: str = Field(default="0.0.0.0", env="API_HOST")
-    api_port: int = Field(default=8080, env="PORT")  # Cloud Run sets PORT=8080
     debug: bool = Field(default=False, env="DEBUG")
     
     # CORS Configuration
