@@ -15,12 +15,19 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the application code
+# Copy the application code and startup script
 COPY app/ ./app/
+COPY startup.sh ./
+
+# Make startup script executable
+RUN chmod +x startup.sh
 
 # Create a non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Run the application
-CMD ["python", "-m", "app.main"]
+# Expose port 8080 (Cloud Run default)
+EXPOSE 8080
+
+# Run the application with the startup script
+CMD ["./startup.sh"]

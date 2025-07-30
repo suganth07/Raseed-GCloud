@@ -76,23 +76,25 @@ async def health_check():
     import datetime
     return {
         "status": "healthy",
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "service": "raseed-backend"
     }
 
 
 @app.get("/ready")
 async def readiness_check():
     """Readiness check endpoint for Cloud Run."""
-    return {"status": "ready"}
+    return {"status": "ready", "service": "raseed-backend"}
 
 
 if __name__ == "__main__":
+    # This only runs when the script is executed directly, not when imported by gunicorn
     import os
     try:
         # Get port from environment variable (Cloud Run sets this automatically)
         port = int(os.environ.get("PORT", 8080))
         debug = os.environ.get("DEBUG", "False").lower() in ("true", "1", "yes")
-        logger.info(f"Starting server on port {port}")
+        logger.info(f"Starting development server on port {port}")
         uvicorn.run(
             "app.main:app",
             host="0.0.0.0",
