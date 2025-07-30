@@ -92,7 +92,7 @@ if __name__ == "__main__":
     import os
     try:
         # Get port from environment variable (Cloud Run sets this automatically)
-        port = int(os.environ.get("PORT", 8080))
+        port = 8080
         debug = os.environ.get("DEBUG", "False").lower() in ("true", "1", "yes")
         logger.info(f"Starting development server on port {port}")
         uvicorn.run(
