@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 import uvicorn
 
 from .utils.config import settings
@@ -16,13 +17,25 @@ from .api.middleware import setup_middleware
 configure_logging(debug=settings.debug)
 logger = get_logger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting Raseed Backend API")
+    logger.info(f"Environment: {'development' if settings.debug else 'production'}")
+    yield
+    # Shutdown
+    logger.info("Shutting down Raseed Backend API")
+
+
 # Create FastAPI app
 app = FastAPI(
     title="Raseed Backend API",
     description="AI-powered receipt processing and expense management system",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 # Setup middleware
@@ -46,19 +59,6 @@ app.include_router(warranty_reminder_router)
 app.include_router(economix_router)
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize application on startup."""
-    logger.info("Starting Raseed Backend API")
-    logger.info(f"Environment: {'development' if settings.debug else 'production'}")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on application shutdown."""
-    logger.info("Shutting down Raseed Backend API")
-
-
 @app.get("/")
 async def root():
     """Root endpoint for health check."""
@@ -73,20 +73,33 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    import datetime
     return {
         "status": "healthy",
-        "timestamp": "2025-01-18T00:00:00Z"
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
     }
+
+
+@app.get("/ready")
+async def readiness_check():
+    """Readiness check endpoint for Cloud Run."""
+    return {"status": "ready"}
 
 
 if __name__ == "__main__":
     import os
-    # Get port from environment variable (Cloud Run sets this automatically)
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=settings.debug,
-        log_level="debug" if settings.debug else "info"
-    )
+    try:
+        # Get port from environment variable (Cloud Run sets this automatically)
+        port = int(os.environ.get("PORT", 8080))
+        debug = os.environ.get("DEBUG", "False").lower() in ("true", "1", "yes")
+        logger.info(f"Starting server on port {port}")
+        uvicorn.run(
+            "app.main:app",
+            host="0.0.0.0",
+            port=port,
+            reload=debug,
+            log_level="debug" if debug else "info"
+        )
+    except Exception as e:
+        logger.error(f"Failed to start server: {str(e)}")
+        raise

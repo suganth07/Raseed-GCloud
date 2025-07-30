@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     api_host: str = Field(default="0.0.0.0", env="API_HOST")
     debug: bool = Field(default=False, env="DEBUG")
     
+    @property
+    def api_port(self) -> int:
+        """Get the API port from environment variable (Cloud Run sets PORT=8080)."""
+        import os
+        return int(os.environ.get("PORT", 8080))
+    
     # CORS Configuration
     allowed_origins: list[str] = Field(
         default=["http://localhost:3000", "http://localhost:8080"], 
