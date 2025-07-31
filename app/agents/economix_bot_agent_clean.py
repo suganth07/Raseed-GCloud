@@ -12,7 +12,9 @@ from datetime import datetime
 
 from ..services.firestore_service import FirestoreService
 from ..services.gemini_service import GeminiService
+from ..services.real_data_validator import RealDataValidator
 from ..utils.logging import LoggerMixin
+from .question_classifier import EnhancedQuestionClassifier
 
 
 class EconomixBotAgent(LoggerMixin):
@@ -21,27 +23,62 @@ class EconomixBotAgent(LoggerMixin):
     """
     
     def __init__(self):
+        # Validate real credentials before initialization
+        validator = RealDataValidator()
+        validation_result = validator.validate_all_services()
+        
+        if not validation_result["all_valid"]:
+            error_msg = "❌ CRITICAL: Cannot initialize bot without real credentials. Mock data not allowed."
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
+        
         self.firestore = FirestoreService()
         self.gemini = GeminiService()
-        self.logger.info("🤖 Clean Economix Bot Agent initialized")
+        self.question_classifier = EnhancedQuestionClassifier()
+        self.validator = validator
+        
+        self.logger.info("🤖 Clean Economix Bot Agent initialized with question classification and real data validation")
     
     async def process_text_message(self, user_id: str, message: str) -> str:
-        """Process text message with user's actual financial data."""
+        """Process text message with user's actual financial data and intelligent classification."""
         try:
             self.logger.info(f"🔍 Processing message for user: {user_id}")
             
-            # Get user's actual financial data
+            # Validate that we can access real user data
+            user_data_validation = await self.validator.validate_user_data_access(user_id)
+            if not user_data_validation["validation_passed"]:
+                self.logger.warning(f"⚠️ User {user_id} has no real financial data available")
+                return (
+                    "I notice you don't have any financial data connected yet. "
+                    "Please upload some receipts or connect your accounts to get personalized insights!"
+                )
+            
+            # Classify the user's question
+            classification_result = await self.question_classifier.classify_question(message)
+            intent = classification_result.intent.value if hasattr(classification_result.intent, 'value') else str(classification_result.intent)
+            confidence = classification_result.confidence
+            
+            self.logger.info(f"🎯 Question classified as: {intent} (confidence: {confidence:.2f})")
+            
+            # Get user's actual financial data - REAL DATA ONLY
             user_financial_data = await self._get_user_financial_data(user_id)
+            
+            # Validate that the data is real (not empty or mock)
+            if user_financial_data["transaction_count"] == 0:
+                return (
+                    "I see you're getting started with Raseed! Upload some receipts or "
+                    "connect your financial accounts to get personalized insights about your spending."
+                )
             
             # Log what we found
             total_spent = user_financial_data.get('total_spent', 0)
             transaction_count = user_financial_data.get('transaction_count', 0)
-            self.logger.info(f"💰 User {user_id} data: ₹{total_spent} across {transaction_count} transactions")
+            self.logger.info(f"💰 User {user_id} REAL data: ₹{total_spent} across {transaction_count} transactions")
             
-            # Create AI prompt with actual user data
-            ai_prompt = self._create_financial_prompt(user_financial_data, message)
+            # Create AI prompt with actual user data and intent context
+            ai_prompt = self._create_financial_prompt(user_financial_data, message, classification_result)
             
-            # Get AI response
+            # Get AI response using REAL Gemini API
             response = await self.gemini.generate_text_response(
                 prompt=ai_prompt,
                 context=[]
@@ -138,14 +175,27 @@ class EconomixBotAgent(LoggerMixin):
         else:
             return 'Other'
     
-    def _create_financial_prompt(self, financial_data: Dict[str, Any], user_message: str) -> str:
-        """Create AI prompt with user's actual financial data."""
+    def _create_financial_prompt(self, financial_data: Dict[str, Any], user_message: str, classification_result = None) -> str:
+        """Create AI prompt with user's actual financial data and intent classification."""
         
         user_id = financial_data.get('user_id', 'Unknown')
         total_spent = financial_data.get('total_spent', 0)
         transaction_count = financial_data.get('transaction_count', 0)
         categories = financial_data.get('categories', {})
         transactions = financial_data.get('transactions', [])
+        
+        # Extract classification info
+        intent = "GENERAL_INQUIRY"
+        confidence = 0.0
+        
+        if classification_result:
+            # Handle both dict and object formats
+            if hasattr(classification_result, 'intent'):
+                intent = classification_result.intent.value if hasattr(classification_result.intent, 'value') else str(classification_result.intent)
+                confidence = classification_result.confidence
+            else:
+                intent = classification_result.get('intent', 'GENERAL_INQUIRY')
+                confidence = classification_result.get('confidence', 0.0)
         
         # Build category breakdown
         category_breakdown = ""
@@ -164,8 +214,29 @@ class EconomixBotAgent(LoggerMixin):
         else:
             recent_transactions = "No transactions recorded yet."
         
+        # Create intent-specific guidance
+        intent_guidance = ""
+        if intent == "SPENDING_ANALYSIS":
+            intent_guidance = "Focus on analyzing spending patterns, categories, and trends."
+        elif intent == "BUDGET_MANAGEMENT":
+            intent_guidance = "Provide budgeting advice and spending limit recommendations."
+        elif intent == "CATEGORY_INQUIRY":
+            intent_guidance = "Focus on specific spending categories and their breakdowns."
+        elif intent == "TRANSACTION_SEARCH":
+            intent_guidance = "Help find specific transactions or merchants."
+        elif intent == "SAVINGS_ADVICE":
+            intent_guidance = "Provide money-saving tips and recommendations."
+        elif intent == "FINANCIAL_GOALS":
+            intent_guidance = "Discuss financial planning and goal-setting strategies."
+        else:
+            intent_guidance = "Provide general financial assistance and guidance."
+
         prompt = f"""
 You are Economix, an AI financial assistant for the Raseed app. You help users understand their spending and make smart financial decisions.
+
+🤖 **QUESTION ANALYSIS:**
+- Intent: {intent} (Confidence: {confidence:.1f})
+- Guidance: {intent_guidance}
 
 USER FINANCIAL DATA FOR {user_id}:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -185,13 +256,14 @@ USER FINANCIAL DATA FOR {user_id}:
 USER QUESTION: {user_message}
 
 INSTRUCTIONS:
-1. Use the ACTUAL financial data provided above
-2. Give specific amounts and transaction counts
-3. Provide helpful insights based on their real spending
-4. Be conversational and helpful
-5. If they have no data, encourage them to start tracking expenses
+1. {intent_guidance}
+2. Use the ACTUAL financial data provided above
+3. Give specific amounts and transaction counts
+4. Provide helpful insights based on their real spending
+5. Be conversational and helpful
+6. If they have no data, encourage them to start tracking expenses
 
-Please provide a helpful response using their actual financial information.
+Please provide a helpful response using their actual financial information and the identified intent.
 """
         
         return prompt

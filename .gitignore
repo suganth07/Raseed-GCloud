@@ -12,7 +12,7 @@ raseed-firebase-key.json
 techstack
 
 # Python
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -32,7 +32,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+Raseed-Frontend/
 # Virtual environments
 venv/
 env/
