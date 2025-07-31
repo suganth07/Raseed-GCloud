@@ -352,17 +352,31 @@ Purchase Date: {self._format_purchase_date(warranty.get('purchase_date'))}
         try:
             warranty_items = await self._get_user_warranties(user_id)
             
-            # Find the specific warranty
+            # Find the specific warranty with flexible matching
             target_warranty = None
+            product_name_lower = product_name.lower().strip()
+            
+            # First try exact match
             for warranty in warranty_items:
-                if warranty["product_name"].lower() == product_name.lower():
+                if warranty["product_name"].lower().strip() == product_name_lower:
                     target_warranty = warranty
                     break
             
+            # If no exact match, try partial match
             if not target_warranty:
+                for warranty in warranty_items:
+                    warranty_name_lower = warranty["product_name"].lower().strip()
+                    if product_name_lower in warranty_name_lower or warranty_name_lower in product_name_lower:
+                        target_warranty = warranty
+                        break
+            
+            if not target_warranty:
+                # Log available products for debugging
+                available_products = [w["product_name"] for w in warranty_items]
+                self.logger.warning(f"Warranty not found for '{product_name}'. Available products: {available_products}")
                 return {
                     "status": "error",
-                    "error_message": f"Warranty for '{product_name}' not found"
+                    "error_message": f"Warranty for '{product_name}' not found. Available products: {', '.join(available_products[:5])}"
                 }
             
             result = await self._create_warranty_reminder(target_warranty)

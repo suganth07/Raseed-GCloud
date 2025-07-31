@@ -12,7 +12,7 @@ try:
 except ImportError:
     genai = None
 
-from ..models.receipt import Receipt, ReceiptItem
+from ..models.receipt import Receipt
 from ..models.knowledge_graph import (
     KnowledgeGraph, GraphEntity, GraphRelation, GraphAnalytics
 )
@@ -211,8 +211,8 @@ class GraphBuilderAgent(LoggerMixin):
         if items_to_process:
             self.logger.info(f"Processing {len(items_to_process)} items for entity classification")
             
-            # Classify items with Gemini
-            classified_items = await self._classify_items_with_gemini(items_to_process)
+            # Classify items with Gemini, passing receipt date for proper expiry calculation
+            classified_items = await self._classify_items_with_gemini(items_to_process, receipt.date)
             
             for item, classification in zip(items_to_process, classified_items):
                 # Get enhanced data from classification
@@ -568,7 +568,7 @@ EXAMPLES of what TO extract:
         
         return response_clean
     
-    async def _classify_items_with_gemini(self, items) -> List[Dict[str, Any]]:
+    async def _classify_items_with_gemini(self, items, receipt_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """Classify receipt items using Gemini 2.5 Flash."""
         try:
             # Prepare items for classification - handle both ReceiptItem objects and dictionaries
@@ -589,24 +589,24 @@ EXAMPLES of what TO extract:
                         "quantity": item.get("quantity", 1)
                     })
             
-            # Create classification prompt
-            prompt = self._create_classification_prompt(items_data)
+            # Create classification prompt with receipt date
+            prompt = self._create_classification_prompt(items_data, receipt_date)
             
             # Call Gemini API
             response = await self._call_gemini(prompt)
             
             # Parse response
-            classifications = self._parse_classification_response(response, len(items))
+            classifications = self._parse_classification_response(response, len(items), receipt_date)
             
             return classifications
             
         except Exception as e:
             self.log_error("classify_items_with_gemini", e)
             self.logger.warning(f"Gemini classification failed: {e}, using fallback classification")
-            # Return enhanced fallback classifications
-            return self._create_fallback_classifications(items)
+            # Return enhanced fallback classifications with receipt date
+            return self._create_fallback_classifications(items, receipt_date)
     
-    def _create_fallback_classifications(self, items) -> List[Dict[str, Any]]:
+    def _create_fallback_classifications(self, items, receipt_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """Create fallback classifications when AI is unavailable."""
         classifications = []
         
@@ -663,8 +663,8 @@ EXAMPLES of what TO extract:
                 has_expiry = True
             
             # Create enhanced classification structure
-            # Predict expiry date using AI logic
-            predicted_expiry = self._predict_expiry_date(item_name) if has_expiry else None
+            # Predict expiry date using AI logic with receipt date
+            predicted_expiry = self._predict_expiry_date(item_name, receipt_date) if has_expiry else None
             
             classification = {
                 "category": category,
@@ -697,58 +697,132 @@ EXAMPLES of what TO extract:
         
         return classifications
     
-    def _predict_expiry_date(self, product_name: str) -> str:
-        """Predict expiry date for products using AI logic when not found in receipt."""
-        from datetime import timedelta
-        
+    async def _get_product_shelf_life_with_gemini(self, product_name: str) -> int:
+        """Get realistic shelf life for a product using Gemini AI."""
+        try:
+            prompt = f"""You are a food safety and product shelf life expert. Given the product name, provide the REALISTIC shelf life in days from purchase date.
+
+Product: "{product_name}"
+
+Consider the product type and provide the typical shelf life in days:
+- Fresh produce: 1-14 days
+- Dairy products: 3-14 days
+- Meat/seafood: 1-5 days
+- Bread/bakery: 2-7 days
+- Packaged foods: 30-365 days
+- Canned goods: 365-1095 days
+- Medicine: 365-1095 days
+- Frozen foods: 30-365 days
+- Non-food items: set to 365 days (1 year) as default
+
+Examples:
+- "Peanut Butter" → 90 days (2-3 months)
+- "Fresh Milk" → 5 days
+- "Banana" → 6 days
+- "Canned Soup" → 730 days (2 years)
+- "Bread" → 4 days
+- "Yogurt" → 7 days
+- "Rice" → 365 days
+- "Chicken Breast" → 2 days
+- "Laptop" → 365 days (non-food)
+
+Return ONLY the number of days as an integer. No explanation, just the number.
+"""
+            
+            response = await self._call_gemini(prompt)
+            
+            # Extract number from response
+            import re
+            numbers = re.findall(r'\d+', response.strip())
+            if numbers:
+                shelf_life_days = int(numbers[0])
+                # Validate reasonable range (1 day to 5 years)
+                if 1 <= shelf_life_days <= 1825:
+                    return shelf_life_days
+            
+            # Fallback to rule-based if Gemini fails
+            return self._get_fallback_shelf_life(product_name)
+            
+        except Exception as e:
+            self.logger.warning(f"Gemini shelf life prediction failed for {product_name}: {e}")
+            return self._get_fallback_shelf_life(product_name)
+    
+    def _get_fallback_shelf_life(self, product_name: str) -> int:
+        """Fallback shelf life prediction when Gemini is unavailable."""
         product_lower = product_name.lower()
-        today = datetime.now().date()
         
-        # Expiry prediction rules based on product type
-        expiry_rules = {
-            # Dairy products (1-7 days)
-            'milk': 3, 'yogurt': 5, 'cream': 4, 'butter': 7, 'cheese': 10,
+        # Enhanced expiry rules with more products
+        shelf_life_rules = {
+            # Dairy products (3-14 days)
+            'milk': 5, 'yogurt': 7, 'cream': 4, 'butter': 14, 'cheese': 21,
             
-            # Bread and bakery (2-5 days)
-            'bread': 3, 'bun': 2, 'cake': 4, 'pastry': 2, 'croissant': 2,
+            # Bread and bakery (2-7 days)
+            'bread': 4, 'bun': 3, 'cake': 5, 'pastry': 2, 'croissant': 2,
             
-            # Fresh produce (1-14 days)
-            'banana': 5, 'apple': 14, 'orange': 10, 'tomato': 7, 'lettuce': 3,
+            # Fresh produce (1-21 days)
+            'banana': 6, 'apple': 14, 'orange': 10, 'tomato': 7, 'lettuce': 3,
             'potato': 30, 'onion': 21, 'carrot': 21, 'cucumber': 7,
             
-            # Meat and seafood (1-3 days)
+            # Meat and seafood (1-5 days)
             'chicken': 2, 'beef': 3, 'pork': 3, 'fish': 1, 'shrimp': 1,
+            'meat': 3, 'seafood': 2,
             
-            # Processed foods (30-365 days)
+            # Processed foods (30-730 days)
             'pasta': 365, 'rice': 365, 'flour': 180, 'sugar': 730,
             'oil': 180, 'vinegar': 730, 'sauce': 90, 'jam': 365,
+            'peanut butter': 90, 'nutella': 90, 'honey': 1095,
             
-            # Beverages (7-365 days)
-            'juice': 7, 'soda': 180, 'water': 365, 'tea': 730, 'coffee': 365,
+            # Beverages (5-365 days)
+            'juice': 5, 'soda': 180, 'water': 365, 'tea': 730, 'coffee': 365,
+            'cola': 180, 'beer': 120, 'wine': 365,
             
             # Frozen foods (30-365 days)
             'frozen': 90, 'ice': 365,
             
             # Canned goods (365-1095 days)
-            'canned': 730, 'can': 730,
+            'canned': 730, 'can': 730, 'tin': 730,
             
             # Medicine and supplements (365-1095 days)
             'tablet': 730, 'capsule': 730, 'syrup': 365, 'vitamin': 730,
+            'medicine': 730, 'drug': 730,
+            
+            # Snacks and packaged items (30-180 days)
+            'chips': 60, 'biscuit': 90, 'chocolate': 180, 'candy': 365,
+            'cookies': 90, 'crackers': 90,
+            
+            # Condiments and spices (180-1095 days)
+            'spice': 730, 'salt': 1095, 'pepper': 730, 'ketchup': 365,
+            'mustard': 365, 'mayo': 60,
             
             # Default for unknown items
             'default': 30
         }
         
-        # Find matching expiry rule
-        expiry_days = expiry_rules.get('default', 30)  # Default 30 days
+        # Find matching shelf life rule
+        shelf_life_days = shelf_life_rules.get('default', 30)
         
-        for keyword, days in expiry_rules.items():
+        for keyword, days in shelf_life_rules.items():
             if keyword != 'default' and keyword in product_lower:
-                expiry_days = days
+                shelf_life_days = days
                 break
         
+        return shelf_life_days
+    
+    def _predict_expiry_date(self, product_name: str, receipt_date: Optional[datetime] = None) -> str:
+        """Predict expiry date for products using receipt date + realistic shelf life."""
+        from datetime import timedelta
+        
+        # Use receipt date if provided, otherwise use current date
+        if receipt_date:
+            base_date = receipt_date.date() if isinstance(receipt_date, datetime) else receipt_date
+        else:
+            base_date = datetime.now().date()
+        
+        # Get shelf life using fallback method (this will be enhanced by Gemini in main flow)
+        shelf_life_days = self._get_fallback_shelf_life(product_name)
+        
         # Calculate expiry date
-        expiry_date = today + timedelta(days=expiry_days)
+        expiry_date = base_date + timedelta(days=shelf_life_days)
         return expiry_date.isoformat()
     
     def _entity_to_comprehensive_node(self, entity) -> Dict[str, Any]:
@@ -772,12 +846,15 @@ EXAMPLES of what TO extract:
             "attributes": relation.attributes
         }
     
-    def _create_classification_prompt(self, items_data: List[Dict[str, Any]]) -> str:
+    def _create_classification_prompt(self, items_data: List[Dict[str, Any]], receipt_date: Optional[datetime] = None) -> str:
         """Create focused prompt for universal receipt analysis with enhanced expiry and price prediction."""
         categories_str = ", ".join(self.product_categories)
         
-        # Calculate dynamic example dates
-        current_date = datetime.now()
+        # Use receipt date if provided, otherwise use current date
+        if receipt_date:
+            purchase_date = receipt_date
+        else:
+            purchase_date = datetime.now()
         
         prompt = f"""Analyze this receipt and return ONLY valid JSON.
 
@@ -800,7 +877,7 @@ Available categories: {categories_str}
 Receipt items:
 {json.dumps(items_data, indent=2)}
 
-CRITICAL: Today is {current_date.strftime("%Y-%m-%d")}. Use this date for expiry predictions.
+CRITICAL: Purchase date is {purchase_date.strftime("%Y-%m-%d")}. Calculate expiry dates from this purchase date.
 
 For REALISTIC EXPIRY DATE PREDICTION, use these ACTUAL shelf life guidelines:
 
@@ -826,10 +903,13 @@ DAIRY PRODUCTS:
 PACKAGED FOODS:
 - Bread (fresh): 3-5 days
 - Bread (packaged): 7-14 days
-- Rice (cooked items): 1-2 days
-- Pasta (cooked): 3-5 days
+- Rice (dry): 365+ days
+- Pasta (dry): 365+ days
 - Snacks/chips: 30-90 days
 - Cereals: 180-365 days
+- Peanut butter: 60-120 days (2-4 months)
+- Jam/jelly: 180-365 days
+- Canned goods: 365-730 days (1-2 years)
 
 BEVERAGES:
 - Fresh juice: 3-5 days
@@ -848,7 +928,12 @@ MEAT & SEAFOOD:
 FROZEN ITEMS:
 - Most frozen foods: Add current shelf life to frozen duration
 
-CALCULATE EXPIRY: current_date + realistic_shelf_life_days
+MEDICINE & HEALTH:
+- Most medicines: 1-3 years (365-1095 days)
+- Vitamins: 1-2 years (365-730 days)
+- Skincare products: 6-24 months (180-730 days)
+
+CALCULATE EXPIRY: purchase_date + realistic_shelf_life_days
 
 Return this exact JSON structure:
 {{
@@ -879,27 +964,30 @@ CATEGORY CLASSIFICATION RULES:
 - Toothpaste, dental care: "personal_care" category
 
 ENHANCED PREDICTION RULES:
-EXPIRY DATE PREDICTION (Today is {current_date.strftime("%Y-%m-%d")}):
+EXPIRY DATE PREDICTION (Purchase date is {purchase_date.strftime("%Y-%m-%d")}):
 
 ANALYZE EACH PRODUCT NAME AND PREDICT REALISTIC EXPIRY:
 1. Identify the exact product type from the name
-2. Look up realistic shelf life for that specific product
-3. Add shelf life days to current date
+2. Look up realistic shelf life for that specific product type
+3. Add shelf life days to purchase date: {purchase_date.strftime("%Y-%m-%d")}
 4. Format as YYYY-MM-DD
 
-EXAMPLES:
-- "SAK LEMON RICE" (prepared rice dish): 1-2 days → "{(current_date + timedelta(days=2)).strftime('%Y-%m-%d')}"
-- "Orange Juice" (fresh): 3-5 days → "{(current_date + timedelta(days=4)).strftime('%Y-%m-%d')}"  
-- "Fresh Apples": 7-14 days → "{(current_date + timedelta(days=10)).strftime('%Y-%m-%d')}"
-- "Milk": 5-7 days → "{(current_date + timedelta(days=6)).strftime('%Y-%m-%d')}"
-- "Bread": 3-5 days → "{(current_date + timedelta(days=4)).strftime('%Y-%m-%d')}"
-- "Tomatoes": 5-7 days → "{(current_date + timedelta(days=6)).strftime('%Y-%m-%d')}"
-- "Cheese" (hard): 30-60 days → "{(current_date + timedelta(days=45)).strftime('%Y-%m-%d')}"
-- "Bananas": 5-7 days → "{(current_date + timedelta(days=6)).strftime('%Y-%m-%d')}"
-- "Canned goods": 365+ days → "{(current_date + timedelta(days=365)).strftime('%Y-%m-%d')}"
-- "Packaged snacks": 60-90 days → "{(current_date + timedelta(days=75)).strftime('%Y-%m-%d')}"
+SPECIFIC EXAMPLES:
+- "Peanut Butter" → 90 days shelf life → "{(purchase_date + timedelta(days=90)).strftime('%Y-%m-%d')}"
+- "Fresh Milk" → 5 days → "{(purchase_date + timedelta(days=5)).strftime('%Y-%m-%d')}"  
+- "Banana" → 6 days → "{(purchase_date + timedelta(days=6)).strftime('%Y-%m-%d')}"
+- "Canned Soup" → 730 days → "{(purchase_date + timedelta(days=730)).strftime('%Y-%m-%d')}"
+- "Bread" → 4 days → "{(purchase_date + timedelta(days=4)).strftime('%Y-%m-%d')}"
+- "Yogurt" → 7 days → "{(purchase_date + timedelta(days=7)).strftime('%Y-%m-%d')}"
+- "Rice (dry)" → 365 days → "{(purchase_date + timedelta(days=365)).strftime('%Y-%m-%d')}"
+- "Chicken Breast" → 2 days → "{(purchase_date + timedelta(days=2)).strftime('%Y-%m-%d')}"
+- "Laptop/Electronics" → 365 days → "{(purchase_date + timedelta(days=365)).strftime('%Y-%m-%d')}"
 
-IMPORTANT: Base expiry on ACTUAL product shelf life, not generic 2-day additions!
+IMPORTANT: 
+- Base expiry on ACTUAL product shelf life, not generic dates!
+- For each product, calculate: {purchase_date.strftime("%Y-%m-%d")} + shelf_life_days
+- Different products have vastly different shelf lives
+- Use realistic food safety guidelines
 
 PRICE EXTRACTION/ESTIMATION:
 - If price is 0 or missing, estimate based on product type and category
@@ -923,7 +1011,7 @@ Instructions:
 - For packaged goods: check typical shelf life for that specific product
 - For dairy: consider if fresh vs processed
 - For beverages: consider if fresh, pasteurized, or shelf-stable
-- Calculate: TODAY + REALISTIC_SHELF_LIFE_DAYS = expiry_date
+- Calculate: PURCHASE_DATE + REALISTIC_SHELF_LIFE_DAYS = expiry_date
 - Mark food items expiring within 3 days as "is_expiring_soon": true
 - Include shelf_life_analysis explaining your reasoning
 - Return ONLY the JSON, no additional text or markdown
@@ -950,7 +1038,7 @@ Instructions:
                     raise
                 await asyncio.sleep(2 ** attempt)  # Exponential backoff
     
-    def _parse_classification_response(self, response: str, expected_count: int) -> List[Dict[str, Any]]:
+    def _parse_classification_response(self, response: str, expected_count: int, receipt_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """Parse AI classification response with robust error handling."""
         try:
             # DEBUG: Log the actual AI response
@@ -979,13 +1067,15 @@ Instructions:
                 self.logger.warning(f"Classification count mismatch: {len(item_classifications)} vs {expected_count}")
                 # Fill missing classifications or trim excess
                 while len(item_classifications) < expected_count:
+                    # Use proper expiry date calculation for missing items
+                    default_expiry = self._predict_expiry_date("food_item", receipt_date)
                     item_classifications.append({
                         "category": "food", 
                         "confidence": 0.6, 
                         "brand": None,
                         "product_type": "food_item",
                         "warranty_info": {"has_warranty": False},
-                        "expiry_info": {"has_expiry": True, "expiry_date": "2025-07-25", "is_expiring_soon": False},
+                        "expiry_info": {"has_expiry": True, "expiry_date": default_expiry, "is_expiring_soon": False},
                         "nutritional_info": {"is_food": True, "allergens": []},
                         "price_analysis": {"unit_price": 0.0, "is_discounted": False}
                     })
@@ -1008,12 +1098,12 @@ Instructions:
             self.logger.error(f"JSON parsing failed for AI response: {e}")
             self.logger.error(f"Raw response that failed to parse: {response[:500]}")
             # Try to extract at least basic categorization
-            return self._fallback_classification(expected_count)
+            return self._fallback_classification(expected_count, receipt_date)
         except Exception as e:
             self.logger.error(f"Error parsing classification response: {e}")
-            return self._fallback_classification(expected_count)
+            return self._fallback_classification(expected_count, receipt_date)
     
-    def _fallback_classification(self, expected_count: int) -> List[Dict[str, Any]]:
+    def _fallback_classification(self, expected_count: int, receipt_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """Provide intelligent fallback classifications when AI parsing fails."""
         self.logger.info("Using fallback classification strategy")
         fallback_categories = ["food", "beverages", "household", "personal_care", "other"]
@@ -1022,6 +1112,14 @@ Instructions:
         for i in range(expected_count):
             # Cycle through reasonable categories
             category = fallback_categories[i % len(fallback_categories)]
+            
+            # Calculate expiry date for food items
+            expiry_date = None
+            if category in ["food", "beverages"]:
+                # Use generic product name for fallback expiry calculation
+                generic_name = f"{category}_item"
+                expiry_date = self._predict_expiry_date(generic_name, receipt_date)
+            
             classifications.append({
                 "category": category, 
                 "confidence": 0.5, 
@@ -1030,7 +1128,7 @@ Instructions:
                     "category": category,
                     "confidence": 0.5,
                     "warranty_info": {"has_warranty": False},
-                    "expiry_info": {"has_expiry": category in ["food", "beverages"], "expiry_date": "2025-07-25" if category in ["food", "beverages"] else None},
+                    "expiry_info": {"has_expiry": category in ["food", "beverages"], "expiry_date": expiry_date},
                     "nutritional_info": {"is_food": category in ["food", "beverages"]},
                     "price_analysis": {"unit_price": 0.0, "is_discounted": False}
                 }
@@ -1154,7 +1252,7 @@ Instructions:
             # Fallback to simple format
             return f"RCP-{datetime.now().strftime('%Y%m%d')}-{graph.id[:8].upper()}"
     
-    def _build_comprehensive_storage_format(self, graph: KnowledgeGraph, analysis: Dict, receipt_id: str) -> Dict[str, Any]:
+    def _build_comprehensive_storage_format(self, graph: KnowledgeGraph, analysis: Dict, receipt_id: str, receipt_date: Optional[datetime] = None) -> Dict[str, Any]:
         """Build the comprehensive storage format combining both specifications."""
         try:
             # Get analysis components
@@ -1171,7 +1269,7 @@ Instructions:
             alerts = []
             latest_expiry = None
             
-            # Process expiry information with AI prediction
+            # Process expiry information with AI prediction using receipt date
             for product in products:
                 # Ensure attributes exist
                 if not product.attributes:
@@ -1179,9 +1277,9 @@ Instructions:
                     
                 expiry_date = product.attributes.get("expiry_date")
                 
-                # If no expiry date found, predict using AI
+                # If no expiry date found, predict using AI with receipt date
                 if not expiry_date:
-                    expiry_date = self._predict_expiry_date(product.name)
+                    expiry_date = self._predict_expiry_date(product.name, receipt_date)
                     product.attributes["expiry_date"] = expiry_date
                     product.attributes["has_expiry"] = True
                 
