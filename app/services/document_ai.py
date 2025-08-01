@@ -240,7 +240,7 @@ class DocumentAIService(LoggerMixin):
             return {
                 "merchant_name": "Unknown",
                 "total_amount": 0.0,
-                "currency": "USD",
+                "currency": "INR",
                 "items": [],
                 "category": "other",
                 "confidence_score": 0.0
@@ -252,7 +252,7 @@ class DocumentAIService(LoggerMixin):
             "merchant_name": "Unknown",
             "extracted_text": extracted_text,
             "total_amount": 0.0,
-            "currency": "USD",
+            "currency": "INR",
             "items": [],
             "category": "other",
             "confidence_score": 0.0,
@@ -296,7 +296,7 @@ class DocumentAIService(LoggerMixin):
                 time=receipt_data.get('time'),
                 total_amount=float(receipt_data.get('total_amount', 0.0)),
                 tax_amount=float(receipt_data.get('tax_amount', 0.0)) if receipt_data.get('tax_amount') else None,
-                currency=receipt_data.get('currency', 'USD'),
+                currency=receipt_data.get('currency', 'INR'),
                 receipt_number=receipt_data.get('receipt_number'),
                 payment_method=receipt_data.get('payment_method'),
                 items=items,
